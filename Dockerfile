@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Small base image, non-root user, no build tools in the final image.
-FROM python:3.13-slim AS base
+FROM python:3.15-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
