@@ -1,0 +1,161 @@
+name: DevSecOps pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: devsecops-app
+  # Week 1 task: pin each tool to a fixed version instead of "latest".
+  TRIVY_IMAGE: aquasec/trivy:latest
+  SYFT_IMAGE: anchore/syft:latest
+  ZAP_IMAGE: ghcr.io/zaproxy/zaproxy:stable
+
+jobs:
+  secrets:
+    name: Secrets scan (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # scan the whole Git history, not just the last commit
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  sast:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Semgrep scan
+        run: semgrep scan --config p/python --config p/dockerfile --error --metrics=off
+
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -r app/requirements-dev.txt
+      - run: python -m pytest -q app/tests
+
+  iac:
+    name: IaC checks (Terraform)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: Format
+        run: terraform fmt -check -recursive
+      - name: Validate
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+      - uses: terraform-linters/setup-tflint@v4
+      - name: TFLint
+        run: |
+          tflint --init
+          tflint --format compact
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Trivy (misconfigurations)
+        working-directory: .
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src "$TRIVY_IMAGE" \
+            config --severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore terraform
+
+  container:
+    name: Build, scan and SBOM
+    runs-on: ubuntu-latest
+    needs: [secrets, sast, test]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t "$IMAGE_NAME:${{ github.sha }}" .
+      - name: Trivy (image vulnerabilities)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$TRIVY_IMAGE" \
+            image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 \
+            "$IMAGE_NAME:${{ github.sha }}"
+      - name: SBOM (Syft, SPDX)
+        run: |
+          mkdir -p reports
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$SYFT_IMAGE" \
+            "$IMAGE_NAME:${{ github.sha }}" -o spdx-json > reports/sbom.spdx.json
+      - name: Save image for the next jobs
+        run: docker save "$IMAGE_NAME:${{ github.sha }}" -o reports/image.tar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: reports/sbom.spdx.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image
+          path: reports/image.tar
+          retention-days: 1
+
+  dast:
+    name: DAST (OWASP ZAP baseline)
+    runs-on: ubuntu-latest
+    needs: [container]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: image
+      - name: Start the app
+        run: |
+          docker load -i image.tar
+          docker run -d --name app -p 8080:8080 "$IMAGE_NAME:${{ github.sha }}"
+          for i in $(seq 1 20); do curl -fs http://localhost:8080/health && break; sleep 2; done
+      - name: ZAP baseline scan
+        run: |
+          mkdir -p zap && chmod 777 zap
+          # -I: report warnings without failing (Week 2 task: fail on chosen rules).
+          docker run --rm --network host -v "$PWD/zap:/zap/wrk:rw" "$ZAP_IMAGE" \
+            zap-baseline.py -t http://localhost:8080/health -r zap-report.html -I
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: zap-report
+          path: zap/zap-report.html
+
+  publish:
+    name: Publish image (GHCR)
+    runs-on: ubuntu-latest
+    needs: [container, dast, iac]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: image
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          TARGET="ghcr.io/$OWNER/devsecops-30-days"
+          docker load -i image.tar
+          docker tag "$IMAGE_NAME:${{ github.sha }}" "$TARGET:${{ github.sha }}"
+          docker tag "$IMAGE_NAME:${{ github.sha }}" "$TARGET:latest"
+          docker push "$TARGET:${{ github.sha }}"
+          docker push "$TARGET:latest"

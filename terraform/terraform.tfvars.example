@@ -1,0 +1,2 @@
+# Copy to terraform.tfvars (git-ignored) and fill in.
+allowed_cidr = "203.0.113.10/32" # your public IP: curl -s https://checkip.amazonaws.com

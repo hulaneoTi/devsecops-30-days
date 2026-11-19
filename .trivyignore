@@ -1,0 +1,8 @@
+# Documented security exceptions.
+# Every entry needs: the finding, why it is accepted, and when to review it.
+
+# AVD-AWS-0104 - Security group allows egress to the public internet.
+# Why: the instance needs outbound HTTPS (443 only) for SSM Session Manager,
+# OS updates and pulling the image from GHCR. No NAT/VPC endpoints in the
+# free-tier sandbox. Review: when VPC endpoints or a NAT gateway are added.
+AVD-AWS-0104
