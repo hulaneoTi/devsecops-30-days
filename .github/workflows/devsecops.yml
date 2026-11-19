@@ -97,11 +97,11 @@ jobs:
             "$IMAGE_NAME:${{ github.sha }}" -o spdx-json > reports/sbom.spdx.json
       - name: Save image for the next jobs
         run: docker save "$IMAGE_NAME:${{ github.sha }}" -o reports/image.tar
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sbom
           path: reports/sbom.spdx.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: image
           path: reports/image.tar
@@ -127,7 +127,7 @@ jobs:
           # -I: report warnings without failing (Week 2 task: fail on chosen rules).
           docker run --rm --network host -v "$PWD/zap:/zap/wrk:rw" "$ZAP_IMAGE" \
             zap-baseline.py -t http://localhost:8080/health -r zap-report.html -I
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: zap-report
